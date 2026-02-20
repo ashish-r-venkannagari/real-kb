@@ -2,14 +2,14 @@ import { z } from 'zod/v3';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { searchKBArticles, getKBArticle, searchAndFetchArticles } from './youtrack-kb.js';
 import { searchSupportSite, getSupportArticle, searchAndFetchSupportArticles } from './support-site.js';
-import { isGitHubConfigured, searchGitHubCode, searchGitHubRepos, searchAndFetchGitHubResults } from './github-search.js';
+import { isGitHubConfigured, searchGitHubCode, searchGitHubRepos, searchAndFetchGitHubResults, getGitHubFile, listRepoContents } from './github-search.js';
 
 export function registerTools(server: McpServer): void {
 
   server.registerTool(
     'ask_product_question',
     {
-      description: 'Search through YouTrack knowledge base (PRDs, RFCs, documentation) and the Real Brokerage support site to gather relevant content for answering a product question. Returns content from both sources for synthesis. After receiving results, you should also look into the code for each of the microservices mentioned in the articles to provide a comprehensive, code-informed answer.',
+      description: 'Search through YouTrack knowledge base (PRDs, RFCs, documentation) and the Real Brokerage support site to gather relevant content for answering a product question. Returns content from both sources along with initial GitHub code search results. IMPORTANT: After receiving results, use search_github_code to find relevant implementations, then use list_github_repo_contents and get_github_file to read the actual source code of microservices mentioned in the articles. This helps verify whether features described in PRDs are actually implemented and provides code-informed answers.',
       inputSchema: {
         question: z.string().describe('The product question to research'),
         max_kb_articles: z.number().optional().describe('Maximum number of YouTrack KB articles to fetch (default: 5)'),
@@ -251,6 +251,99 @@ export function registerTools(server: McpServer): void {
 
       return {
         content: [{ type: 'text' as const, text }],
+      };
+    }
+  );
+
+  server.registerTool(
+    'get_github_file',
+    {
+      description: 'Fetch the full content of a specific file from a GitHub repository. Use this after finding relevant files via search_github_code to read the actual implementation and verify if a feature is implemented.',
+      inputSchema: {
+        repo: z.string().describe('Full repository name (e.g., "Realtyka/transaction-service")'),
+        path: z.string().describe('File path within the repository (e.g., "src/main/java/com/real/service/CommissionService.java")'),
+        ref: z.string().optional().describe('Branch, tag, or commit SHA (default: repo default branch)'),
+      },
+    },
+    async ({ repo, path, ref }) => {
+      if (!isGitHubConfigured()) {
+        return {
+          content: [{ type: 'text' as const, text: 'GitHub search is not configured. Set GITHUB_TOKEN environment variable to enable this tool.' }],
+        };
+      }
+
+      const file = await getGitHubFile(repo, path, ref);
+
+      if (!file) {
+        return {
+          content: [{ type: 'text' as const, text: `File not found: ${repo}/${path}` }],
+        };
+      }
+
+      const header = [
+        `**${repo}** / \`${path}\``,
+        `**Size:** ${file.size} bytes`,
+        `**URL:** ${file.htmlUrl}`,
+        '',
+      ].join('\n');
+
+      // Truncate very large files to avoid overwhelming the context
+      const maxChars = 50000;
+      let content = file.content;
+      let truncated = false;
+      if (content.length > maxChars) {
+        content = content.substring(0, maxChars);
+        truncated = true;
+      }
+
+      const text = header + '```\n' + content + '\n```' +
+        (truncated ? `\n\n*File truncated at ${maxChars} characters. Total size: ${file.size} bytes.*` : '');
+
+      return {
+        content: [{ type: 'text' as const, text }],
+      };
+    }
+  );
+
+  server.registerTool(
+    'list_github_repo_contents',
+    {
+      description: 'List files and directories in a GitHub repository path. Use this to explore repository structure — find source directories, configuration files, or locate specific service implementations before reading them with get_github_file.',
+      inputSchema: {
+        repo: z.string().describe('Full repository name (e.g., "Realtyka/transaction-service")'),
+        path: z.string().optional().describe('Directory path within the repository (default: root). e.g., "src/main/java/com/real/service"'),
+        ref: z.string().optional().describe('Branch, tag, or commit SHA (default: repo default branch)'),
+      },
+    },
+    async ({ repo, path, ref }) => {
+      if (!isGitHubConfigured()) {
+        return {
+          content: [{ type: 'text' as const, text: 'GitHub search is not configured. Set GITHUB_TOKEN environment variable to enable this tool.' }],
+        };
+      }
+
+      const entries = await listRepoContents(repo, path || '', ref);
+
+      if (entries.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: `No contents found at ${repo}/${path || ''}` }],
+        };
+      }
+
+      // Sort: directories first, then files
+      entries.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      const text = entries.map(entry => {
+        const icon = entry.type === 'dir' ? '📁' : '📄';
+        const size = entry.type === 'file' ? ` (${entry.size} bytes)` : '';
+        return `${icon} ${entry.path}${size}`;
+      }).join('\n');
+
+      return {
+        content: [{ type: 'text' as const, text: `**${repo}** / \`${path || '/'}\`\n\n${text}` }],
       };
     }
   );

@@ -19,6 +19,15 @@ interface GitHubRepoMatch {
   htmlUrl: string;
 }
 
+interface GitHubContentEntry {
+  name: string;
+  path: string;
+  type: 'file' | 'dir';
+  size: number;
+  url: string;
+  htmlUrl: string;
+}
+
 export function isGitHubConfigured(): boolean {
   return GITHUB_TOKEN.length > 0;
 }
@@ -105,6 +114,73 @@ export async function searchGitHubRepos(
     }));
   } catch (error) {
     console.error('Error searching GitHub repos:', error);
+    return [];
+  }
+}
+
+export async function getGitHubFile(
+  repo: string,
+  path: string,
+  ref?: string
+): Promise<{ content: string; size: number; htmlUrl: string } | null> {
+  try {
+    const params: Record<string, string> = {};
+    if (ref) params.ref = ref;
+
+    const data = await githubFetch(`/repos/${repo}/contents/${path}`, params);
+
+    if (data.type !== 'file') {
+      return null;
+    }
+
+    // GitHub returns base64-encoded content
+    const content = Buffer.from(data.content, 'base64').toString('utf-8');
+
+    return {
+      content,
+      size: data.size,
+      htmlUrl: data.html_url || '',
+    };
+  } catch (error) {
+    console.error(`Error fetching file ${repo}/${path}:`, error);
+    return null;
+  }
+}
+
+export async function listRepoContents(
+  repo: string,
+  path: string = '',
+  ref?: string
+): Promise<GitHubContentEntry[]> {
+  try {
+    const apiPath = path ? `/repos/${repo}/contents/${path}` : `/repos/${repo}/contents`;
+    const params: Record<string, string> = {};
+    if (ref) params.ref = ref;
+
+    const data = await githubFetch(apiPath, params);
+
+    if (!Array.isArray(data)) {
+      // Single file, not a directory
+      return [{
+        name: data.name,
+        path: data.path,
+        type: data.type === 'dir' ? 'dir' : 'file',
+        size: data.size || 0,
+        url: data.url || '',
+        htmlUrl: data.html_url || '',
+      }];
+    }
+
+    return data.map((item: any) => ({
+      name: item.name,
+      path: item.path,
+      type: item.type === 'dir' ? 'dir' as const : 'file' as const,
+      size: item.size || 0,
+      url: item.url || '',
+      htmlUrl: item.html_url || '',
+    }));
+  } catch (error) {
+    console.error(`Error listing contents of ${repo}/${path}:`, error);
     return [];
   }
 }
