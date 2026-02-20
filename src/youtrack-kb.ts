@@ -49,7 +49,7 @@ async function youtrackFetch(path: string, params?: Record<string, string>): Pro
 }
 
 export async function searchKBArticles(query: string, limit: number = 10): Promise<YouTrackArticle[]> {
-  const fields = 'id,idReadable,summary,content,created,updated,project(id,name,shortName),parentArticle(id,idReadable,summary)';
+  const fields = 'id,idReadable,summary,content,created,updated,project(id,name,shortName),parentArticle(id,idReadable,summary),childArticles(id,idReadable,summary)';
 
   try {
     const articles = await youtrackFetch('/articles', {
@@ -97,21 +97,14 @@ export async function getArticleTree(projectShortName?: string, depth: number = 
 }
 
 export async function searchAndFetchArticles(query: string, maxArticles: number = 5): Promise<string> {
+  // Search already returns full content + childArticles, no need for individual fetches
   const articles = await searchKBArticles(query, maxArticles);
 
   if (articles.length === 0) {
     return 'No YouTrack knowledge base articles found for this query.';
   }
 
-  const results: string[] = [];
-  for (const article of articles) {
-    const fullArticle = await getKBArticle(article.idReadable || article.id);
-    if (fullArticle) {
-      results.push(formatArticle(fullArticle));
-    }
-  }
-
-  return results.join('\n\n---\n\n');
+  return articles.map(article => formatArticle(article)).join('\n\n---\n\n');
 }
 
 function formatArticle(article: YouTrackArticle): string {
