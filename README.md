@@ -1,20 +1,21 @@
 # Real KB MCP Server
 
-An MCP (Model Context Protocol) server that searches across YouTrack knowledge base articles (PRDs, RFCs, documentation) and the Real Brokerage support site to help answer product questions.
+An MCP (Model Context Protocol) server that searches across YouTrack knowledge base articles (PRDs, RFCs, documentation), the Real Brokerage support site, and GitHub repositories to help answer product questions.
 
 ## Tools
 
-The server exposes 5 tools:
+The server exposes 7 tools:
 
 ### `ask_product_question`
 
-The primary tool. Searches both YouTrack KB and the support site in parallel, fetches full article content, and returns combined results for the LLM to synthesize an answer.
+The primary tool. Searches YouTrack KB, the support site, and optionally GitHub code in parallel, then returns combined results for the LLM to synthesize an answer.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `question` | string | yes | - | The product question to research |
 | `max_kb_articles` | number | no | 5 | Max YouTrack KB articles to fetch |
 | `max_support_articles` | number | no | 3 | Max support articles to fetch |
+| `include_github` | boolean | no | `true` if `GITHUB_TOKEN` is set | Include GitHub code search results |
 
 After receiving results, the LLM is instructed to also look into the code for each microservice mentioned in the articles to provide a comprehensive, code-informed answer.
 
@@ -52,10 +53,35 @@ Fetch the full content of a specific support article by its URL.
 |-----------|------|----------|---------|-------------|
 | `url` | string | yes | - | Full URL of the support article |
 
+### `search_github_code`
+
+Search for code across GitHub repositories in the organization. Useful for finding implementations, configurations, or references to specific features, services, or patterns.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | yes | - | Search query (e.g., `TransactionService`, `commission calculation`) |
+| `org` | string | no | `Realtyka` | GitHub organization to search |
+| `limit` | number | no | 10 | Max results to return |
+
+> Requires `GITHUB_TOKEN` to be configured. Returns a helpful message if not set.
+
+### `search_github_repos`
+
+Search for repositories in the GitHub organization. Useful for discovering microservices, libraries, or projects related to a feature or domain.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | yes | - | Search query (e.g., `commission`, `notification`) |
+| `org` | string | no | `Realtyka` | GitHub organization to search |
+| `limit` | number | no | 5 | Max results to return |
+
+> Requires `GITHUB_TOKEN` to be configured. Returns a helpful message if not set.
+
 ## Data Sources
 
 - **YouTrack Knowledge Base** - PRDs, RFCs, and internal documentation stored as YouTrack articles. Accessed via the YouTrack REST API (`/api/articles`). Requires authentication.
 - **Real Brokerage Support Site** - Public-facing help articles at `support.therealbrokerage.com`. Accessed via the Zendesk Help Center API (`/api/v2/help_center/articles/search.json`). No authentication required.
+- **GitHub Repositories** - Source code across the organization's repositories. Accessed via the GitHub REST API (`/search/code`, `/search/repositories`). Requires authentication. **Optional** — the server works without it.
 
 ## Environment Variables
 
@@ -64,6 +90,8 @@ Fetch the full content of a specific support article by its URL.
 | `YOUTRACK_BASE_URL` | yes | YouTrack instance URL (e.g., `https://example.youtrack.cloud`) |
 | `YOUTRACK_TOKEN` | yes | YouTrack API token with KB read access |
 | `YOUTRACK_DEFAULT_PROJECT` | no | Default project key for article queries (e.g., `RV2`) |
+| `GITHUB_TOKEN` | no | GitHub personal access token for code search |
+| `GITHUB_ORG` | no | GitHub organization to search (default: `Realtyka`) |
 
 ## Installation
 
@@ -73,7 +101,7 @@ If you have [maestro](https://github.com/Realtyka/maestro) installed:
 
 ```bash
 maestro init
-# Select "real-kb" from the list and provide your YouTrack credentials
+# Select "real-kb" from the list and provide your credentials
 ```
 
 This configures the server for both Claude Code and Claude Desktop automatically.
@@ -94,12 +122,16 @@ Pull the image and configure your MCP client.
         "-e", "YOUTRACK_BASE_URL",
         "-e", "YOUTRACK_TOKEN",
         "-e", "YOUTRACK_DEFAULT_PROJECT",
+        "-e", "GITHUB_TOKEN",
+        "-e", "GITHUB_ORG",
         "ghcr.io/realtyka/real-kb-mcp-server:latest"
       ],
       "env": {
         "YOUTRACK_BASE_URL": "https://your-instance.youtrack.cloud",
         "YOUTRACK_TOKEN": "your-api-token",
-        "YOUTRACK_DEFAULT_PROJECT": "RV2"
+        "YOUTRACK_DEFAULT_PROJECT": "RV2",
+        "GITHUB_TOKEN": "ghp_your-github-token",
+        "GITHUB_ORG": "Realtyka"
       }
     }
   }
@@ -118,12 +150,16 @@ Pull the image and configure your MCP client.
         "-e", "YOUTRACK_BASE_URL",
         "-e", "YOUTRACK_TOKEN",
         "-e", "YOUTRACK_DEFAULT_PROJECT",
+        "-e", "GITHUB_TOKEN",
+        "-e", "GITHUB_ORG",
         "ghcr.io/realtyka/real-kb-mcp-server:latest"
       ],
       "env": {
         "YOUTRACK_BASE_URL": "https://your-instance.youtrack.cloud",
         "YOUTRACK_TOKEN": "your-api-token",
-        "YOUTRACK_DEFAULT_PROJECT": "RV2"
+        "YOUTRACK_DEFAULT_PROJECT": "RV2",
+        "GITHUB_TOKEN": "ghp_your-github-token",
+        "GITHUB_ORG": "Realtyka"
       }
     }
   }
@@ -152,7 +188,9 @@ Then configure your MCP client:
       "env": {
         "YOUTRACK_BASE_URL": "https://your-instance.youtrack.cloud",
         "YOUTRACK_TOKEN": "your-api-token",
-        "YOUTRACK_DEFAULT_PROJECT": "RV2"
+        "YOUTRACK_DEFAULT_PROJECT": "RV2",
+        "GITHUB_TOKEN": "ghp_your-github-token",
+        "GITHUB_ORG": "Realtyka"
       }
     }
   }
@@ -186,14 +224,15 @@ docker build -t ghcr.io/realtyka/real-kb-mcp-server:latest .
 ```
 src/
   index.ts          # Server entrypoint - creates MCP server and stdio transport
-  tools.ts          # Registers all 5 MCP tools with zod schemas
+  tools.ts          # Registers all 7 MCP tools with zod schemas
   youtrack-kb.ts    # YouTrack REST API client for KB article search/fetch
   support-site.ts   # Zendesk Help Center API client for support article search/fetch
+  github-search.ts  # GitHub REST API client for code and repository search
 ```
 
 ## CI/CD
 
-A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) builds and publishes the Docker image on release or manual dispatch. It builds multi-platform images (linux/amd64, linux/arm64) and pushes to the container registry.
+A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) builds and publishes the Docker image on release or manual dispatch. It builds multi-platform images (linux/amd64, linux/arm64) and pushes to the GitHub Container Registry.
 
 ## Generating a YouTrack API Token
 
@@ -204,3 +243,11 @@ A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) builds and pu
 5. Name it (e.g., "MCP Integration")
 6. Add scope: **YouTrack (Full access)**
 7. Click **Create** and copy the token
+
+## Generating a GitHub Personal Access Token
+
+1. Go to [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens)
+2. Click **Generate new token (classic)**
+3. Name it (e.g., "Real KB MCP")
+4. Select scopes: **repo** (read access to repositories)
+5. Click **Generate token** and copy it

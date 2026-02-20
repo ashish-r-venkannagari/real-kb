@@ -2,6 +2,7 @@ import { z } from 'zod/v3';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { searchKBArticles, getKBArticle, searchAndFetchArticles } from './youtrack-kb.js';
 import { searchSupportSite, getSupportArticle, searchAndFetchSupportArticles } from './support-site.js';
+import { isGitHubConfigured, searchGitHubCode, searchGitHubRepos, searchAndFetchGitHubResults } from './github-search.js';
 
 export function registerTools(server: McpServer): void {
 
@@ -13,16 +14,24 @@ export function registerTools(server: McpServer): void {
         question: z.string().describe('The product question to research'),
         max_kb_articles: z.number().optional().describe('Maximum number of YouTrack KB articles to fetch (default: 5)'),
         max_support_articles: z.number().optional().describe('Maximum number of support articles to fetch (default: 3)'),
+        include_github: z.boolean().optional().describe('Include GitHub code search results (default: true if GITHUB_TOKEN is configured)'),
       },
     },
-    async ({ question, max_kb_articles, max_support_articles }) => {
+    async ({ question, max_kb_articles, max_support_articles, include_github }) => {
       const kbLimit = max_kb_articles ?? 5;
       const supportLimit = max_support_articles ?? 3;
+      const shouldSearchGitHub = include_github ?? isGitHubConfigured();
 
-      const [kbContent, supportContent] = await Promise.all([
+      const promises: Promise<string>[] = [
         searchAndFetchArticles(question, kbLimit),
         searchAndFetchSupportArticles(question, supportLimit),
-      ]);
+      ];
+
+      if (shouldSearchGitHub && isGitHubConfigured()) {
+        promises.push(searchAndFetchGitHubResults(question));
+      }
+
+      const [kbContent, supportContent, githubContent] = await Promise.all(promises);
 
       const response = [
         '# YouTrack Knowledge Base Results',
@@ -34,6 +43,12 @@ export function registerTools(server: McpServer): void {
         '# Support Site Results',
         '',
         supportContent,
+        '',
+        '---',
+        '',
+        '# GitHub Code Search Results',
+        '',
+        githubContent || 'GitHub search is not configured (GITHUB_TOKEN not set). Skipping code search.',
       ].join('\n');
 
       return {
@@ -155,6 +170,87 @@ export function registerTools(server: McpServer): void {
       const content = await getSupportArticle(url);
       return {
         content: [{ type: 'text' as const, text: content }],
+      };
+    }
+  );
+
+  server.registerTool(
+    'search_github_code',
+    {
+      description: 'Search for code across GitHub repositories in the organization. Useful for finding implementations, configurations, or references to specific features, services, or patterns.',
+      inputSchema: {
+        query: z.string().describe('Search query (e.g., "TransactionService", "commission calculation", "class AgentProfile")'),
+        org: z.string().optional().describe('GitHub organization to search in (default: Realtyka)'),
+        limit: z.number().optional().describe('Maximum number of results (default: 10)'),
+      },
+    },
+    async ({ query, org, limit }) => {
+      if (!isGitHubConfigured()) {
+        return {
+          content: [{ type: 'text' as const, text: 'GitHub search is not configured. Set GITHUB_TOKEN environment variable to enable this tool.' }],
+        };
+      }
+
+      const results = await searchGitHubCode(query, org, limit ?? 10);
+
+      if (results.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: 'No code matches found.' }],
+        };
+      }
+
+      const text = results.map(match => {
+        const parts = [`**${match.repository}** / \`${match.filePath}\``];
+        parts.push(`  ${match.url}`);
+        if (match.textMatches.length > 0) {
+          parts.push('```');
+          parts.push(match.textMatches.join('\n...\n'));
+          parts.push('```');
+        }
+        return parts.join('\n');
+      }).join('\n\n');
+
+      return {
+        content: [{ type: 'text' as const, text }],
+      };
+    }
+  );
+
+  server.registerTool(
+    'search_github_repos',
+    {
+      description: 'Search for repositories in the GitHub organization. Useful for discovering microservices, libraries, or projects related to a feature or domain.',
+      inputSchema: {
+        query: z.string().describe('Search query (e.g., "commission", "notification", "agent-service")'),
+        org: z.string().optional().describe('GitHub organization to search in (default: Realtyka)'),
+        limit: z.number().optional().describe('Maximum number of results (default: 5)'),
+      },
+    },
+    async ({ query, org, limit }) => {
+      if (!isGitHubConfigured()) {
+        return {
+          content: [{ type: 'text' as const, text: 'GitHub search is not configured. Set GITHUB_TOKEN environment variable to enable this tool.' }],
+        };
+      }
+
+      const results = await searchGitHubRepos(query, org, limit ?? 5);
+
+      if (results.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: 'No matching repositories found.' }],
+        };
+      }
+
+      const text = results.map(repo => {
+        const parts = [`**${repo.fullName}**`];
+        if (repo.language) parts.push(`  Language: ${repo.language}`);
+        if (repo.description) parts.push(`  ${repo.description}`);
+        parts.push(`  ${repo.htmlUrl}`);
+        return parts.join('\n');
+      }).join('\n\n');
+
+      return {
+        content: [{ type: 'text' as const, text }],
       };
     }
   );
